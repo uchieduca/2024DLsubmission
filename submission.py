@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torchvision
 from torchvision import transforms
+from transformers import BertModel, BertTokenizer, AutoTokenizer
+
 
 def set_seed(seed):
     random.seed(seed)
@@ -83,13 +85,14 @@ class VQADataset(torch.utils.data.Dataset):
 
         # question / answerの辞書を作成
         self.question2idx = {}
-        self.answer2idx = {}
         self.idx2question = {}
-        self.idx2answer = {}
+        answer_copus = pandas.read_csv("https://huggingface.co/spaces/CVPR/VizWiz-CLIP-VQA/raw/main/data/annotations/class_mapping.csv")
+        self.answer2idx = dict(zip(answer_copus["answer"], answer_copus["class_id"]))
+        self.idx2answer = {v: k for k, v in self.answer2idx.items()}
 
         # 質問文に含まれる単語を辞書に追加
         for question in self.df["question"]:
-            question = process_text(question)
+            words = process_text(question)
             words = question.split(" ")
             for word in words:
                 if word not in self.question2idx:
@@ -134,7 +137,7 @@ class VQADataset(torch.utils.data.Dataset):
         image : torch.Tensor  (C, H, W)
             画像データ
         question : torch.Tensor  (vocab_size)
-            質問文をone-hot表現に変換したもの
+            質問文のベクトル表現
         answers : torch.Tensor  (n_answer)
             10人の回答者の回答のid
         mode_answer_idx : torch.Tensor  (1)
@@ -302,6 +305,14 @@ def ResNet50():
 class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int):
         super().__init__()
+
+        self.bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        self.bert_model = BertModel.from_pretrained(
+            "bert-base-uncased", torch_dtype=torch.float32, attn_implementation="sdpa"
+        )
+        for param in self.bert_model.parameters():
+            param.requires_grad = False
+
         self.resnet = ResNet18()
         self.text_encoder = nn.Linear(vocab_size, 512)
 
@@ -377,8 +388,15 @@ def main():
 
     # dataloader / model
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
+        transforms.Resize(size=(224, 224)),
+        transforms.ToTensor(),
+        transforms.RandomHorizontalFlip(p=1.0),
+        transforms.RandomVerticalFlip(p=1.0),
+        transforms.RandomRotation(degrees=(-180, 180)),
+        transforms.RandomCrop(size=(20, 20)),
+        transforms.RandomErasing(p=0.8, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
+        transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
     ])
     train_dataset = VQADataset(df_path="/content/drive/MyDrive/Colab Notebooks/DLBasics2023_colab/最終課題/data/train.json", image_dir="/content/dl_lecture_competition_pub/train", transform=transform)
     test_dataset = VQADataset(df_path="/content/drive/MyDrive/Colab Notebooks/DLBasics2023_colab/最終課題/data/valid.json", image_dir="/content/dl_lecture_competition_pub/valid", transform=transform, answer=False)
@@ -390,7 +408,7 @@ def main():
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
     # optimizer / criterion
-    num_epoch = 1
+    num_epoch = 20
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
